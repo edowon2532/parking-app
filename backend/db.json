@@ -1,0 +1,54 @@
+{
+    "vehicles": [
+        {
+            "plateNumber": "179루7651",
+            "ownerName": "이도원",
+            "unitNumber": "117-1101",
+            "phoneNumber": "010-6344-7402",
+            "type": "resident",
+            "id": "1764339701207",
+            "registeredAt": "2025-11-28T23:21:41.207843",
+            "violations": []
+        },
+        {
+            "plateNumber": "32모2491",
+            "ownerName": "이경민",
+            "unitNumber": "101-1102",
+            "phoneNumber": "01091897681",
+            "type": "resident",
+            "id": "1764339795747",
+            "registeredAt": "2025-11-28T23:23:15.747167",
+            "violations": []
+        },
+        {
+            "plateNumber": "220서2799",
+            "ownerName": "미지정",
+            "unitNumber": "미지정",
+            "phoneNumber": "",
+            "type": "visitor",
+            "id": "1764341205573",
+            "registeredAt": "2025-11-28T23:46:45.573812",
+            "violations": []
+        }
+    ],
+    "history": [
+        {
+            "type": "report",
+            "plateNumber": "179루7651",
+            "ownerName": "이도원",
+            "unitNumber": "117-1101",
+            "note": "지상주차",
+            "id": "1764352376433",
+            "timestamp": "2025-11-29T02:52:56.433463"
+        },
+        {
+            "type": "report",
+            "plateNumber": "220서2799",
+            "ownerName": "미지정",
+            "unitNumber": "미지정",
+            "note": "지상주차",
+            "id": "1764341205659",
+            "timestamp": "2025-11-28T23:46:45.659661"
+        }
+    ]
+}

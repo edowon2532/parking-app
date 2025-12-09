@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-multipart
+easyocr
+opencv-python-headless
+# pytorch CPU only via extra index url logic is handled by Render or we specify exact wheel?
+# Usually just 'torch' grabs CUDA version which is huge.
+# For Render free tier, we need to keep slug size small.
+# But for simplicity, let's start with standard list.
+torch
+torchvision
+numpy
+Pillow
+python-dotenv
+pandas
+openpyxl
