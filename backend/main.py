@@ -27,24 +27,29 @@ reader = None
 def load_models():
     global car_model, lp_model, reader
     print("Loading models...")
+    
+    # Get backend directory path
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    
     # Load YOLOv5 models
     # Note: We use the local path for custom model, but 'yolov5s' is loaded from hub
     # Force CPU to avoid MPS/CPU mismatch errors on Mac
     car_model = torch.hub.load("ultralytics/yolov5", 'yolov5s', force_reload=False, skip_validation=True, device='cpu')
     car_model.classes = [2, 3, 5, 7] # Car, Motorcycle, Bus, Truck
 
-    lp_model = torch.hub.load('ultralytics/yolov5', 'custom', 'backend/lp_det.pt', device='cpu')
+    # Use absolute path for lp_det.pt
+    lp_path = os.path.join(BASE_DIR, 'lp_det.pt')
+    lp_model = torch.hub.load('ultralytics/yolov5', 'custom', lp_path, device='cpu')
     
     # Load EasyOCR
-    # user_network_directory needs to be absolute or relative to CWD. 
-    # Since we run from parking-app root usually, or backend root. 
-    # Let's assume running from parking-app root, so 'backend/lp_models/...'
-    # But if we run `python backend/main.py` inside backend, it differs.
-    # Let's assume we run `uvicorn backend.main:app` from `parking-app` directory.
+    # Use absolute paths for directories
+    user_network_dir = os.path.join(BASE_DIR, 'lp_models', 'user_network')
+    model_storage_dir = os.path.join(BASE_DIR, 'lp_models', 'models')
+    
     reader = easyocr.Reader(['ko', 'en'], 
                             detect_network='craft', 
-                            user_network_directory='backend/lp_models/user_network', 
-                            model_storage_directory='backend/lp_models/models',
+                            user_network_directory=user_network_dir, 
+                            model_storage_directory=model_storage_dir,
                             gpu=False) # Force CPU
     print("Models loaded.")
 
