@@ -28,13 +28,18 @@ def load_models():
     global car_model, lp_model, reader
     print("Loading models...")
     
+    # Memory optimization for Render Free Tier (512MB RAM limit)
+    torch.set_grad_enabled(False)
+    torch.set_num_threads(1)
+    
     # Get backend directory path
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     
     # Load YOLOv5 models
     # Note: We use the local path for custom model, but 'yolov5s' is loaded from hub
     # Force CPU to avoid MPS/CPU mismatch errors on Mac
-    car_model = torch.hub.load("ultralytics/yolov5", 'yolov5s', force_reload=False, skip_validation=True, device='cpu')
+    # Use 'yolov5n' (nano) to save memory
+    car_model = torch.hub.load("ultralytics/yolov5", 'yolov5n', force_reload=False, skip_validation=True, device='cpu')
     car_model.classes = [2, 3, 5, 7] # Car, Motorcycle, Bus, Truck
 
     # Use absolute path for lp_det.pt
