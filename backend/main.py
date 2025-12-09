@@ -159,7 +159,10 @@ import os
 # --- API Endpoints ---
 from pydantic import BaseModel
 from typing import List, Optional
-import backend.database as db
+try:
+    import backend.database as db
+except ImportError:
+    import database as db
 import pandas as pd
 from fastapi.responses import FileResponse
 import shutil
