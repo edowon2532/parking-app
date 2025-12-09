@@ -6,8 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def log_error(msg):
-    with open("backend/error.log", "a") as f:
-        f.write(f"{datetime.now()}: {msg}\n")
+    print(f"ERROR: {datetime.now()}: {msg}")
 
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
