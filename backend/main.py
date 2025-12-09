@@ -19,97 +19,165 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import gc
+import os
+
 # Global models
 car_model = None
 lp_model = None
 reader = None
 
-def load_models():
-    global car_model, lp_model, reader
-    print("Loading models...")
-    
-    # Memory optimization for Render Free Tier (512MB RAM limit)
-    torch.set_grad_enabled(False)
-    torch.set_num_threads(1)
-    
-    # Get backend directory path
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    
-    # Load YOLOv5 models
-    # Note: We use the local path for custom model, but 'yolov5s' is loaded from hub
-    # Force CPU to avoid MPS/CPU mismatch errors on Mac
-    # Use 'yolov5n' (nano) to save memory
-    car_model = torch.hub.load("ultralytics/yolov5", 'yolov5n', force_reload=False, skip_validation=True, device='cpu')
-    car_model.classes = [2, 3, 5, 7] # Car, Motorcycle, Bus, Truck
+def get_car_model():
+    global car_model
+    if car_model is None:
+        print("Loading Car Model...")
+        # Memory optimization for Render Free Tier (512MB RAM limit)
+        torch.set_grad_enabled(False)
+        torch.set_num_threads(1)
+        
+        # Load YOLOv5 models
+        # Note: We use the local path for custom model, but 'yolov5s' is loaded from hub
+        # Force CPU to avoid MPS/CPU mismatch errors on Mac
+        # Use 'yolov5n' (nano) to save memory
+        car_model = torch.hub.load("ultralytics/yolov5", 'yolov5n', force_reload=False, skip_validation=True, device='cpu')
+        car_model.classes = [2, 3, 5, 7] # Car, Motorcycle, Bus, Truck
+    return car_model
 
-    # Use absolute path for lp_det.pt
-    lp_path = os.path.join(BASE_DIR, 'lp_det.pt')
-    lp_model = torch.hub.load('ultralytics/yolov5', 'custom', lp_path, device='cpu')
-    
-    # Load EasyOCR
-    # Use absolute paths for directories
-    user_network_dir = os.path.join(BASE_DIR, 'lp_models', 'user_network')
-    model_storage_dir = os.path.join(BASE_DIR, 'lp_models', 'models')
-    
-    reader = easyocr.Reader(['ko', 'en'], 
-                            detect_network='craft', 
-                            user_network_directory=user_network_dir, 
-                            model_storage_directory=model_storage_dir,
-                            gpu=False) # Force CPU
-    print("Models loaded.")
+def get_lp_model():
+    global lp_model
+    if lp_model is None:
+        print("Loading Custom LP Model...")
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        # Use absolute path for lp_det.pt
+        lp_path = os.path.join(BASE_DIR, 'lp_det.pt')
+        lp_model = torch.hub.load('ultralytics/yolov5', 'custom', lp_path, device='cpu')
+    return lp_model
 
-@app.on_event("startup")
-async def startup_event():
-    load_models()
+def get_reader():
+    global reader
+    if reader is None:
+        print("Loading EasyOCR...")
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        # Load EasyOCR
+        # Use absolute paths for directories
+        user_network_dir = os.path.join(BASE_DIR, 'lp_models', 'user_network')
+        model_storage_dir = os.path.join(BASE_DIR, 'lp_models', 'models')
+        
+        reader = easyocr.Reader(['ko', 'en'], 
+                                detect_network='craft', 
+                                user_network_directory=user_network_dir, 
+                                model_storage_directory=model_storage_dir,
+                                gpu=False) # Force CPU
+    return reader
 
 def process_image(image_bytes):
     im = Image.open(io.BytesIO(image_bytes))
     # Convert to numpy for some ops if needed, but YOLO takes PIL
     
+    # Lazy load models
+    car_net = get_car_model()
+    
     # 1. Detect Cars
-    results = car_model(im)
+    results = car_net(im)
     locs = results.xyxy[0]
     
     detected_texts = []
-
-    # Helper to process plate
+    
+    # Get reader lazily if needed (will be used inside helper)
+    
+    # Helper to process plate with Multi-pass OCR
     def recognize_plate(plate_img_pil):
-        # Convert to CV2 grayscale for EasyOCR
+        # Lazy load reader
+        ocr_reader = get_reader()
+        
+        # 1. Base Image Preparation
+        # Convert to CV2 grayscale
         open_cv_image = np.array(plate_img_pil) 
-        # Convert RGB to BGR 
-        open_cv_image = open_cv_image[:, :, ::-1].copy() 
-        gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
+        if open_cv_image.ndim == 3:
+            open_cv_image = open_cv_image[:, :, ::-1].copy() # RGB to BGR
+            gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = open_cv_image
+
+        # Resize (Upscale) to ensure characters are large enough for OCR
+        # Target width around 300px seems optimal for EasyOCR on 6-8 chars
+        h, w = gray.shape
+        aspect_ratio = w / h
+        target_width = 300
+        target_height = int(target_width / aspect_ratio)
+        gray_resized = cv2.resize(gray, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
         
-        # Preprocessing: Histogram Equalization (Contrast)
-        gray = cv2.equalizeHist(gray)
-        # Preprocessing: Gaussian Blur (Noise Reduction)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        # Preprocessing Candidates
+        candidates = []
         
-        # Resize to match model input size (imgW: 200, imgH: 60)
-        # Reverting to fixed size as requested by user (Original working version)
-        gray = cv2.resize(gray, (200, 60))
+        # Pass 1: Standard Preprocessing (EqHist + Gaussian)
+        # Good for general cases
+        p1 = cv2.equalizeHist(gray_resized)
+        p1 = cv2.GaussianBlur(p1, (3, 3), 0)
+        candidates.append(p1)
         
-        # License Plate Character whitelist - Official Korean LP characters
+        # Pass 2: Binary Thresholding (Otsu)
+        # Good for high contrast requirements
+        _, p2 = cv2.threshold(gray_resized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        candidates.append(p2)
+        
+        # Pass 3: Morphological Dilation (Thicken characters)
+        # Fixes thin/broken fonts
+        kernel = np.ones((2, 2), np.uint8)
+        p3 = cv2.dilate(p2, kernel, iterations=1)
+        candidates.append(p3)
+        
+        # Pass 4: Morphological Erosion (Thin characters)
+        # Fixes bold/merged fonts
+        p4 = cv2.erode(p2, kernel, iterations=1)
+        candidates.append(p4)
+        
+        # Pass 5: Inverted Threshold (White on Black)
+        # Sometimes helps if the plate is detected as dark
+        p5 = cv2.bitwise_not(p2)
+        candidates.append(p5)
+
+        # License Plate Character whitelist
+        # Include all possible Korean chars for plates
         valid_korean = '가나다라마거너더러머버서어저고노도로모보소오조구누두루무부수우주아바사자배하허호'
+        # Add '서울', '경기' etc. region prefixes if we want to catch old plates, 
+        # but regex mainly targets the serial number part. 
+        # For strict matching, we focus on the alphanumerics.
         allowed_chars = '0123456789' + valid_korean + ' '
         
-        result = reader.recognize(gray, allowlist=allowed_chars)
-
-        if result:
-            full_text = "".join([res[1] for res in result]).replace(" ", "")
-            
-            # Rule: Ignore left blue design area (by using regex search which skips prefix noise)
-            # Rule: Finds digits(2,3) + Korean(1) + digits(4)
-            match = re.search(r'([0-9]{2,3})[' + valid_korean + r']([0-9]{4})', full_text)
-            
-            if match:
-                return match.group(0)
+        for i, candidate in enumerate(candidates):
+            try:
+                # Run OCR
+                result = ocr_reader.recognize(candidate, allowlist=allowed_chars, detail=1)
+                
+                if result:
+                    # Combine all detected text parts
+                    full_text = "".join([res[1] for res in result]).replace(" ", "")
+                    print(f"Pass {i+1} candidate: {full_text}") # Debug log
+                    
+                    # Regex for Korean License Plates
+                    # Patterns:
+                    # 1. New (3 digit): 123가4567
+                    # 2. Old (2 digit): 12가3456
+                    # 3. Commercial/Old: 서울12가3456 (We extracting the numeric part usually)
+                    
+                    # Match standard format: (2 or 3 digits) (Korean char) (4 digits)
+                    match = re.search(r'([0-9]{2,3})[' + valid_korean + r']([0-9]{4})', full_text)
+                    
+                    if match:
+                        final_text = match.group(0)
+                        print(f"Matched: {final_text}")
+                        return final_text
+            except Exception as e:
+                print(f"OCR Pass {i+1} Error: {e}")
+                continue
                 
         return None
 
     if len(locs) == 0:
         # No car detected, try detecting plate on whole image
-        lp_results = lp_model(im)
+        lp_net = get_lp_model()
+        lp_results = lp_net(im)
         for rslt in lp_results.xyxy[0]:
             x1, y1, x2, y2 = [int(x) for x in rslt[:4]]
             plate_crop = im.crop((x1, y1, x2, y2))
@@ -118,11 +186,14 @@ def process_image(image_bytes):
                 detected_texts.append({"text": text, "box": [x1, y1, x2, y2]})
     else:
         # Car detected, crop car then detect plate
+        # Load LP model
+        lp_net = get_lp_model()
+        
         for *box, conf, cls in locs:
             x1, y1, x2, y2 = [int(x) for x in box]
             car_crop = im.crop((x1, y1, x2, y2))
             
-            lp_results = lp_model(car_crop)
+            lp_results = lp_net(car_crop)
             for rslt in lp_results.xyxy[0]:
                 px1, py1, px2, py2 = [int(x) for x in rslt[:4]]
                 # Calculate absolute coordinates on original image
@@ -135,7 +206,10 @@ def process_image(image_bytes):
                 text = recognize_plate(plate_crop)
                 if text:
                     detected_texts.append({"text": text, "box": [abs_x1, abs_y1, abs_x2, abs_y2]})
-
+    
+    # Explicit garbage collection
+    gc.collect()
+    
     return detected_texts
 
 @app.post("/analyze")
