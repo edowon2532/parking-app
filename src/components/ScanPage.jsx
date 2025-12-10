@@ -5,7 +5,7 @@ import { fetchVehicles } from '../utils/api';
 import VehicleActionCard from './VehicleActionCard';
 
 const ScanPage = () => {
-    // Version: 2025-12-10-20-21-Force-Rebuild
+    // Version: 2025-12-11-01-53-Refine-Camera
     const videoRef = useRef(null);
     const canvasRef = useRef(null);
     const overlayRef = useRef(null);
@@ -47,29 +47,23 @@ const ScanPage = () => {
 
     useEffect(() => {
         // Initial setup
-        if (!isIOS) {
-            getCameras(); // Load cameras on mount for Android/Desktop
-        }
+        // We start camera immediately. on Android/Desktop this triggers permission prompt.
+        // Once we have a stream, we can enumerate devices with labels to find the best one.
+        startCamera();
+
         return () => stopCamera();
     }, []);
 
-    useEffect(() => {
-        let intervalId;
-        if (isAutoScanning && videoRef.current && scanStatus === 'scanning') {
-            intervalId = setInterval(() => {
-                captureAndScan();
-            }, 800);
-        }
-        return () => clearInterval(intervalId);
-    }, [isAutoScanning, scanStatus]);
-
-    const getCameras = async () => {
+    const getCameras = async (activeStream) => {
         try {
+            // Ensure we have permissions first (activeStream proves it basically)
             const devices = await navigator.mediaDevices.enumerateDevices();
             const videoDevices = devices.filter(device => device.kind === 'videoinput');
             setCameras(videoDevices);
 
-            // Smart selection logic
+            if (isIOS) return; // iOS handles camera switching automatically/natively well mostly, or restrictive
+
+            // Smart selection logic for Android/Desktop
             const backCameras = videoDevices.filter(device =>
                 device.label.toLowerCase().includes('back') ||
                 device.label.toLowerCase().includes('rear') ||
@@ -86,7 +80,8 @@ const ScanPage = () => {
                     return !label.includes('wide') &&
                         !label.includes('ultra') &&
                         !label.includes('tele') &&
-                        !label.includes('0.5x');
+                        !label.includes('0.5') && // 0.5x usually wide
+                        !label.includes('macro');
                 });
 
                 bestCameraId = mainCamera ? mainCamera.deviceId : backCameras[0].deviceId;
@@ -95,8 +90,23 @@ const ScanPage = () => {
                 bestCameraId = videoDevices[0].deviceId;
             }
 
+            // If we found a best camera and it's DIFFERENT from what we might be using (if any), switch.
+            // But initially startCamera uses 'environment' facingMode.
+            // If we have a specific deviceId that is "better", we should use it.
             if (bestCameraId) {
-                setSelectedCameraId(bestCameraId);
+                // Check if we are currently using this device
+                const currentTrack = activeStream?.getVideoTracks()[0];
+                const currentDeviceId = currentTrack?.getSettings()?.deviceId;
+
+                if (currentDeviceId !== bestCameraId) {
+                    console.log("Switching to better camera:", bestCameraId);
+                    setSelectedCameraId(bestCameraId);
+                    // We need to restart camera with this ID
+                    // But avoid infinite loop. selectedCameraId change triggers useEffect? 
+                    // No, useEffect depends on [scanStatus, selectedCameraId]. 
+                    // So setting it here will trigger the effect, which calls startCamera(bestCameraId).
+                    // Perfect.
+                }
             }
         } catch (err) {
             console.error("Error enumerating devices:", err);
@@ -114,7 +124,7 @@ const ScanPage = () => {
                 }
             };
 
-            // Fallback if no deviceId provided (shouldn't happen with new logic but safe to keep)
+            // Fallback if no deviceId provided
             if (!deviceId) {
                 constraints.video.facingMode = 'environment';
             }
@@ -123,8 +133,17 @@ const ScanPage = () => {
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
             }
+
+            // On first load (no deviceId specified), or even if specified, check/update camera list
+            // Only do this if we haven't locked in a camera choice or if we barely have info.
+            // Or just always do it once to ensure we are on the best one.
+            if (!deviceId) {
+                await getCameras(stream);
+            }
+
         } catch (err) {
             console.error("Error accessing camera:", err);
+
 
             // Handle specific error cases for better UX
             if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
@@ -370,7 +389,7 @@ const ScanPage = () => {
                     />
 
                     <div className="absolute bottom-4 left-0 right-0 text-center text-white/80 text-sm pointer-events-none bg-black/30 py-1">
-                        {scanStatus === 'scanning' ? "자동 스캔 중... (안 되면 터치)" : "스캔 일시 중지됨"}
+                        {scanStatus === 'scanning' ? "자동 스캔 중..." : "스캔 일시 중지됨"}
                     </div>
 
                     {/* Manual Trigger Overlay for when Camera is black/fails but no error thrown yet */}
