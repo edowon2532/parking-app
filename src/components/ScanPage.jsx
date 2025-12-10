@@ -102,6 +102,8 @@ const ScanPage = () => {
         }
     };
 
+    const fileInputRef = useRef(null); // Ref for fallback file input
+
     const startCamera = async (deviceId) => {
         stopCamera();
         try {
@@ -124,7 +126,97 @@ const ScanPage = () => {
             }
         } catch (err) {
             console.error("Error accessing camera:", err);
-            alert("카메라에 접근할 수 없습니다. 권한을 확인해주세요.");
+
+            // Handle specific error cases for better UX
+            if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                alert("카메라 권한이 차단되었습니다.\n\n브라우저 주소창 옆의 '자물쇠' 또는 '설정' 아이콘을 눌러 [카메라 권한]을 '허용'으로 변경해주세요.");
+            } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                alert("카메라 장치를 찾을 수 없습니다.");
+            } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+                alert("카메라를 다른 앱이 사용 중입니다. 잠시 후 다시 시도해주세요.");
+            } else if (!window.isSecureContext) {
+                alert("카메라 기능은 보안 연결(HTTPS) 환경에서만 작동합니다.\n파일 업로드로 대체합니다.");
+            } else {
+                alert("카메라 권한을 얻지 못했습니다. 파일 업로드로 대체합니다.");
+            }
+
+            // Fallback: Use Input File anyway so they can proceed
+            if (fileInputRef.current) {
+                fileInputRef.current.click();
+            }
+        }
+    };
+
+    const handleFileUpload = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const img = new Image();
+            img.onload = () => {
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+
+                // Trigger analysis directly on this image
+                processImageFromCanvas(canvas);
+            };
+            img.src = event.target.result;
+        };
+        reader.readAsDataURL(file);
+    };
+
+    // Extracted processing logic to be reusable
+    const processImageFromCanvas = async (canvas) => {
+        const image = canvas.toDataURL('image/png');
+
+        // Visual feedback that we are processing
+        setCapturedImage(image);
+        setScannedText("분석 중...");
+        setShowModal(true);
+
+        try {
+            const response = await fetch(image);
+            const blob = await response.blob();
+            const formData = new FormData();
+            formData.append('file', blob, 'capture.png');
+
+            let API_URL = import.meta.env.VITE_API_URL || '';
+            if (API_URL.endsWith('/')) {
+                API_URL = API_URL.slice(0, -1);
+            }
+
+            const apiResponse = await fetch(`${API_URL}/analyze`, {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await apiResponse.json();
+            let text = data.text;
+            const box = data.box;
+
+            let isValid = false;
+            if (text && text !== "인식실패" && text !== "오류발생") {
+                text = text.replace(/[^0-9가-힣]/g, '');
+                if (text.length >= 4) {
+                    isValid = true;
+                }
+            }
+
+            if (isValid) {
+                setScannedText(text);
+                setCapturedImage(image); // Or crop if we implemented crop for file upload
+                setIsAutoScanning(false);
+                setScanStatus('pending');
+            } else {
+                setScannedText("인식 실패");
+            }
+        } catch (err) {
+            console.error("OCR Error (File):", err);
+            setScannedText("오류 발생");
         }
     };
 
@@ -176,9 +268,23 @@ const ScanPage = () => {
         const canvas = canvasRef.current;
         const context = canvas.getContext('2d');
 
+        // Check if video is actually ready
+        if (video.readyState !== video.HAVE_ENOUGH_DATA) {
+            isProcessingRef.current = false;
+            return;
+        }
+
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // Use extracted logic, but we need to handle the isProcessingRef flag carefully
+        // processImageFromCanvas is async, so we wait or just fire and forget?
+        // Let's integrate logic back here or make processImageFromCanvas clean up the ref?
+        // To be safe and quick, I will just call the image processing part here or refactor processImageFromCanvas to NOT set isProcessingRef itself, but call it.
+
+        // Actually, let's just duplicate the core fetch part or keep it simple. 
+        // The previous code had specific box drawing logic which is good for live video.
 
         const image = canvas.toDataURL('image/png');
 
@@ -342,13 +448,41 @@ const ScanPage = () => {
                     />
 
                     <div className="absolute bottom-4 left-0 right-0 text-center text-white/80 text-sm pointer-events-none bg-black/30 py-1">
-                        {scanStatus === 'scanning' ? "자동 스캔 중..." : "스캔 일시 중지됨"}
+                        {scanStatus === 'scanning' ? "자동 스캔 중... (안 되면 터치)" : "스캔 일시 중지됨"}
                     </div>
+
+                    {/* Hidden Native File Input for Android Fallback */}
+                    <input
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        ref={fileInputRef}
+                        className="hidden"
+                        onChange={handleFileUpload}
+                    />
+
+                    {/* Manual Trigger Overlay for when Camera is black/fails but no error thrown yet */}
+                    <div
+                        className="absolute inset-0 cursor-pointer"
+                        onClick={() => {
+                            // If user clicks video area, try focusing or if on android/mobile, maybe trigger native
+                            // For now, let's keep it simple. If valid video stream, do nothing. 
+                            // If no stream (e.g. black screen), user might want to click.
+
+                            // Let's allow clicking to force native camera if they want
+                            if (!videoRef.current?.srcObject) {
+                                fileInputRef.current?.click();
+                            }
+                        }}
+                    />
 
                     {/* Camera Switch Button */}
                     {!isIOS && cameras.length > 1 && (
                         <button
-                            onClick={switchCamera}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                switchCamera();
+                            }}
                             className="absolute top-4 right-4 bg-black/50 text-white p-2 rounded-full backdrop-blur-sm active:scale-95 transition-transform z-10"
                         >
                             <RefreshCw className="w-6 h-6" />
