@@ -5,6 +5,7 @@ import { fetchVehicles } from '../utils/api';
 import VehicleActionCard from './VehicleActionCard';
 
 const ScanPage = () => {
+    // Version: 2025-12-10-20-21-Force-Rebuild
     const videoRef = useRef(null);
     const canvasRef = useRef(null);
     const overlayRef = useRef(null);
