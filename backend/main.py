@@ -23,6 +23,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+BACKEND_VERSION = "v1.2.0 (PaddleOCR)"
+
+@app.get("/version")
+async def get_version():
+    return {"version": BACKEND_VERSION}
+
 import gc
 import os
 
