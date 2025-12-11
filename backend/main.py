@@ -1,12 +1,16 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import torch
-import easyocr
+from paddleocr import PaddleOCR
 import numpy as np
 import cv2
 from PIL import Image
 import io
 import re
+import logging
+
+# Suppress Paddle logs
+logging.getLogger("ppocr").setLevel(logging.ERROR)
 
 app = FastAPI()
 
@@ -56,18 +60,11 @@ def get_lp_model():
 def get_reader():
     global reader
     if reader is None:
-        print("Loading EasyOCR...")
-        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        # Load EasyOCR
-        # Use absolute paths for directories
-        user_network_dir = os.path.join(BASE_DIR, 'lp_models', 'user_network')
-        model_storage_dir = os.path.join(BASE_DIR, 'lp_models', 'models')
-        
-        reader = easyocr.Reader(['ko', 'en'], 
-                                detect_network='craft', 
-                                user_network_directory=user_network_dir, 
-                                model_storage_directory=model_storage_dir,
-                                gpu=False) # Force CPU
+        print("Loading PaddleOCR...")
+        # Initialize PaddleOCR
+        # use_angle_cls=False for speed, lang='korean'
+        # use_gpu=False explicit
+        reader = PaddleOCR(use_angle_cls=False, lang='korean', use_gpu=False, show_log=False)
     return reader
 
 def process_image(image_bytes):
@@ -85,93 +82,48 @@ def process_image(image_bytes):
     
     # Get reader lazily if needed (will be used inside helper)
     
-    # Helper to process plate with Multi-pass OCR
+    # Helper to process plate with PaddleOCR
     def recognize_plate(plate_img_pil):
         # Lazy load reader
         ocr_reader = get_reader()
         
-        # 1. Base Image Preparation
-        # Convert to CV2 grayscale
-        open_cv_image = np.array(plate_img_pil) 
-        if open_cv_image.ndim == 3:
-            open_cv_image = open_cv_image[:, :, ::-1].copy() # RGB to BGR
-            gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = open_cv_image
-
-        # Resize (Upscale) to ensure characters are large enough for OCR
-        # Target width around 300px seems optimal for EasyOCR on 6-8 chars
-        h, w = gray.shape
-        aspect_ratio = w / h
-        target_width = 300
-        target_height = int(target_width / aspect_ratio)
-        gray_resized = cv2.resize(gray, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
+        # Convert to numpy (RGB)
+        img_np = np.array(plate_img_pil)
         
-        # Preprocessing Candidates
-        candidates = []
+        # PaddleOCR expects BGR usually if read via cv2, but check doc. 
+        # Actually PaddleOCR uses cv2.imread which is BGR.
+        # If we pass RGB numpy array, it should be fine if we are consistent or convert.
+        # Let's convert to BGR for safety as it's standard OpenCV format expected by many libs.
+        if img_np.ndim == 3:
+            img_np = img_np[:, :, ::-1].copy() # RGB to BGR
         
-        # Pass 1: Standard Preprocessing (EqHist + Gaussian)
-        # Good for general cases
-        p1 = cv2.equalizeHist(gray_resized)
-        p1 = cv2.GaussianBlur(p1, (3, 3), 0)
-        candidates.append(p1)
+        # Run OCR
+        # cls=False for speed
+        result = ocr_reader.ocr(img_np, cls=False)
         
-        # Pass 2: Binary Thresholding (Otsu)
-        # Good for high contrast requirements
-        _, p2 = cv2.threshold(gray_resized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        candidates.append(p2)
+        # result is a list of lists (one per image). Since we send one image: result[0]
+        if not result or result[0] is None:
+            return None
+            
+        # Parse results
+        full_text = ""
+        for line in result[0]:
+            # line: [[ [x1,y1], ... ], ("text", conf)]
+            text, conf = line[1]
+            full_text += text
+            
+        full_text = full_text.replace(" ", "")
         
-        # Pass 3: Morphological Dilation (Thicken characters)
-        # Fixes thin/broken fonts
-        kernel = np.ones((2, 2), np.uint8)
-        p3 = cv2.dilate(p2, kernel, iterations=1)
-        candidates.append(p3)
-        
-        # Pass 4: Morphological Erosion (Thin characters)
-        # Fixes bold/merged fonts
-        p4 = cv2.erode(p2, kernel, iterations=1)
-        candidates.append(p4)
-        
-        # Pass 5: Inverted Threshold (White on Black)
-        # Sometimes helps if the plate is detected as dark
-        p5 = cv2.bitwise_not(p2)
-        candidates.append(p5)
-
-        # License Plate Character whitelist
-        # Include all possible Korean chars for plates
+        # Regex Validation
+        # License Plate Character whitelist - Official Korean LP characters
         valid_korean = '가나다라마거너더러머버서어저고노도로모보소오조구누두루무부수우주아바사자배하허호'
-        # Add '서울', '경기' etc. region prefixes if we want to catch old plates, 
-        # but regex mainly targets the serial number part. 
-        # For strict matching, we focus on the alphanumerics.
-        allowed_chars = '0123456789' + valid_korean + ' '
+        # Regex to capture patterns like 12가3456 or 123가4567
+        # Allow some noise but look for the structure
+        match = re.search(r'([0-9]{2,3})[' + valid_korean + r']([0-9]{4})', full_text)
         
-        for i, candidate in enumerate(candidates):
-            try:
-                # Run OCR
-                result = ocr_reader.recognize(candidate, allowlist=allowed_chars, detail=1)
-                
-                if result:
-                    # Combine all detected text parts
-                    full_text = "".join([res[1] for res in result]).replace(" ", "")
-                    print(f"Pass {i+1} candidate: {full_text}") # Debug log
-                    
-                    # Regex for Korean License Plates
-                    # Patterns:
-                    # 1. New (3 digit): 123가4567
-                    # 2. Old (2 digit): 12가3456
-                    # 3. Commercial/Old: 서울12가3456 (We extracting the numeric part usually)
-                    
-                    # Match standard format: (2 or 3 digits) (Korean char) (4 digits)
-                    match = re.search(r'([0-9]{2,3})[' + valid_korean + r']([0-9]{4})', full_text)
-                    
-                    if match:
-                        final_text = match.group(0)
-                        print(f"Matched: {final_text}")
-                        return final_text
-            except Exception as e:
-                print(f"OCR Pass {i+1} Error: {e}")
-                continue
-                
+        if match:
+            return match.group(0)
+            
         return None
 
     if len(locs) == 0:
